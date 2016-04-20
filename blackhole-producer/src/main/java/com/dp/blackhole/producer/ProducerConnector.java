@@ -1,6 +1,5 @@
 package com.dp.blackhole.producer;
 
-import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.util.List;
 import java.util.Map;
@@ -40,9 +39,11 @@ public class ProducerConnector implements Runnable {
     private final Log LOG = LogFactory.getLog(ProducerConnector.class);
     private static final int FIVE_MINUTES = 5 * 60;
     private static final long DEFAULT_PRODUCER_ROLL_PERIOD = 3600;
+    private static final int DEFAULT_DELAY_SECONDS = 5;
     //this is a static instance, concurrency of all actions should be take to account
     private static ProducerConnector instance = new ProducerConnector();
     private LingeringSender linger;
+    private static String version = Util.getVersion();
     
     public static ProducerConnector getInstance() {
         return instance;
@@ -129,10 +130,17 @@ public class ProducerConnector implements Runnable {
     }
 
     public void prepare(Producer producer) {
+        fillUnassignedQueue(producer);
+        requireProducerId(producer);
+    }
+
+    private void fillUnassignedQueue(Producer producer) {
         unAssignIdProducers.putIfAbsent(producer.getTopic(), new LinkedBlockingQueue<Producer>());
         LinkedBlockingQueue<Producer> producers = unAssignIdProducers.get(producer.getTopic());
         producers.offer(producer);
-        
+    }
+
+    private void requireProducerId(Producer producer) {
         workingProducers.putIfAbsent(producer.getTopic(), new ConcurrentHashMap<String, Producer>());
         processor.requireConfigFromSupersivor(producer.getTopic(), 0);
     }
@@ -143,18 +151,17 @@ public class ProducerConnector implements Runnable {
         send(msg, delaySecond);
     }
     
-    private void requireBrokerForPartition(String topic, String produerId,
-            String partitionId, int reassignDelay) {
-        Message msg = PBwrap.wrapPartitionBrokerRequire(topic, produerId, partitionId);
+    private void requireBrokerForPartition(String topic, String producerId, String partitionId, int reassignDelay) {
+        Message msg = PBwrap.wrapPartitionBrokerRequire(topic, producerId, partitionId);
         LOG.info("partition " + partitionId + " require a broker");
         send(msg, reassignDelay);
     }
 
-    public void reportPartitionConnectionFailure(String topic, String produerId,
-            String partitionId, long ts, int reassignDelay) {
+    public void reportPartitionConnectionFailure(String topic, String partitionId, long ts, int reassignDelay) {
         Message message = PBwrap.wrapProducerFailure(topic, partitionId, ts);
         send(message);
-        requireBrokerForPartition(topic, produerId, partitionId, reassignDelay);
+        String producerId = Util.getProducerIdFromPartitionId(partitionId);
+        requireBrokerForPartition(topic, producerId, partitionId, reassignDelay);
     }
 
     private void send(Message message, int delaySecond) {
@@ -196,20 +203,23 @@ public class ProducerConnector implements Runnable {
     public class ProducerProcessor implements EntityProcessor<ByteBuffer, ByteBufferNonblockingConnection> {
 
         private HeartBeat heartbeat;
-
-        
-        public void ConfReq(String topic, int delaySecond) {
-            Message msg = PBwrap.wrapConfReq(topic);
-            LOG.info("Request a config for " + topic + " after " + delaySecond + " seconds");
-            send(msg, delaySecond);
-        }
+        private boolean hasConnectBefore = false;
         
         @Override
         public void OnConnected(ByteBufferNonblockingConnection connection) {
             LOG.info("ProducerConnector connected");
             supervisor = connection;
-            heartbeat = new HeartBeat(supervisor);
+            heartbeat = new HeartBeat(supervisor, version);
             heartbeat.start();
+            if (hasConnectBefore) {
+                for (LinkedBlockingQueue<Producer> unAssignedProducers : unAssignIdProducers.values()) {
+                    for (Producer producer : unAssignedProducers) {
+                        requireProducerId(producer);
+                    }
+                }
+            } else {
+                hasConnectBefore = true;
+            }
         }
 
         @Override
@@ -218,6 +228,13 @@ public class ProducerConnector implements Runnable {
             supervisor = null;
             heartbeat.shutdown();
             heartbeat = null;
+            for (Map<String, Producer> producers : workingProducers.values()) {
+                for(Producer producer : producers.values()) {
+                    fillUnassignedQueue(producer);
+                }
+                producers.clear();
+            }
+            workingProducers.clear();
         }
 
         @Override
@@ -239,7 +256,7 @@ public class ProducerConnector implements Runnable {
             String producerId;
             MessageType type = msg.getType();
             switch (type) {
-            case NOAVAILABLECONF:
+            case NO_AVAILABLE_CONF:
                 NoavailableConf noavailableConf = msg.getNoavailableConf();
                 topic = noavailableConf.getTopic();
                 requireConfigFromSupersivor(topic, FIVE_MINUTES);
@@ -269,45 +286,20 @@ public class ProducerConnector implements Runnable {
                 
                 producerReg(topic, producerId, 0);
                 break;
-            case NOAVAILABLENODE:
+            case NO_AVAILABLE_NODE:
                 NoAvailableNode noAvailableNode = msg.getNoAvailableNode();
                 topic = noAvailableNode.getTopic();
                 producerId = noAvailableNode.getSource();
-                producerReg(topic, producerId, 0);
+                producerReg(topic, producerId, DEFAULT_DELAY_SECONDS);
+                break;
+            case ASSIGN_BROKER:
+                assignOneBroker(msg.getAssignBroker());
                 break;
             case ASSIGN_PARTITION:
                 AssignPartition assignPartition = msg.getAssignPartition();
                 List<AssignBroker> assigns = assignPartition.getAssignsList();
                 for (AssignBroker assignBroker : assigns) {
-                    topic = assignBroker.getTopic();
-                    producerMap = workingProducers.get(topic);
-                    if (producerMap == null) {
-                        LOG.error("There is no working producers register for topic " + topic);
-                        continue;
-                    }
-                    String broker = assignBroker.getBrokerServer();
-                    int brokerPort = assignBroker.getBrokerPort();
-                    String partitionId = assignBroker.getPartitionId();
-                    producerId = Util.getProducerIdFromPartitionId(partitionId);
-                    Producer p = producerMap.get(producerId);
-                    PartitionConnection partitionConnection = new PartitionConnection(p.geTopicMeta(), topic, broker, brokerPort, partitionId);
-                    try {
-                        boolean success = partitionConnection.initializeRemoteConnection();
-                        if (success) {
-                            LOG.info(producerId + " TopicReg with ["
-                                    + broker + ":" + brokerPort + "] successfully");
-                        } else {
-                            throw new IOException(producerId + " TopicReg with ["
-                                    + broker + ":" + brokerPort
-                                    + "] unsuccessfully cause broker create partition faild");
-                        }
-                    } catch (IOException e) {
-                        LOG.error("init remote connection fail, register again.", e);
-                        producerReg(topic, producerId, 0);
-                        continue;
-                    }
-                    p.assignPartitionConnection(partitionConnection);
-                    linger.register(topic, partitionId, partitionConnection);
+                    assignOneBroker(assignBroker);
                 }
                 break;
             case RECOVERY_ROLL:
@@ -333,6 +325,38 @@ public class ProducerConnector implements Runnable {
             }
         }
         
+        private void assignOneBroker(AssignBroker assignOneBroker) {
+            String topic = assignOneBroker.getTopic();
+            Map<String, Producer> producerMap = workingProducers.get(topic);
+            if (producerMap == null) {
+                LOG.error("There is no working producers register for topic " + topic);
+                return;
+            }
+            String broker = assignOneBroker.getBrokerServer();
+            int brokerPort = assignOneBroker.getBrokerPort();
+            String partitionId = assignOneBroker.getPartitionId();
+            String producerId = Util.getProducerIdFromPartitionId(partitionId);
+            Producer p = producerMap.get(producerId);
+            if (p == null) {
+                LOG.warn("no producer found for " + partitionId + " , cause it maybe old");
+                return;
+            }
+            PartitionConnection partitionConnection = new PartitionConnection(p.geTopicMeta(), topic, broker, brokerPort, partitionId);
+            boolean success = partitionConnection.initializeRemoteConnection();
+            if (success) {
+                LOG.info(producerId + " TopicReg with ["
+                        + broker + ":" + brokerPort + "] successfully");
+            } else {
+                LOG.error(producerId + " TopicReg with ["
+                        + broker + ":" + brokerPort
+                        + "] unsuccessfully cause broker create partition faild");
+                producerReg(topic, producerId, 0);
+                return;
+            }
+            p.assignPartitionConnection(partitionConnection);
+            linger.register(partitionConnection);
+        }
+
         public void requireConfigFromSupersivor(String topic, int delaySecond) {
             Message msg = PBwrap.wrapConfReq(topic);
             LOG.info("Require a configuration for " + topic + " after " + delaySecond + " seconds.");
