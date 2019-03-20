@@ -17,6 +17,7 @@ import com.dp.blackhole.common.Util;
 import com.dp.blackhole.network.EntityProcessor;
 import com.dp.blackhole.network.GenClient;
 import com.dp.blackhole.network.HeartBeat;
+import com.dp.blackhole.network.NioService;
 import com.dp.blackhole.network.ByteBufferNonblockingConnection;
 import com.google.protobuf.InvalidProtocolBufferException;
 import com.dp.blackhole.protocol.control.DumpReplyPB.DumpReply;
@@ -145,6 +146,13 @@ public class Cli {
                     Message msg = PBwrap.wrapListConsumerGroups();
                     send(msg);
                     out.println("send message: " + msg);
+                } else if (cmd.equals("rmgroup")) {
+                    String[] tokens = getTokens(cmd);
+                    String topic = tokens[1];
+                    String groupId = tokens[2];
+                    Message msg = PBwrap.wrapRetireConsumerGroup(topic, groupId);
+                    send(msg);
+                    out.println("send message: " + msg);
                 } else if (cmd.equals("help")) {
                     out.println("Usage:");
                     out.println(" dumpstat              Display all of streams information.");
@@ -162,6 +170,7 @@ public class Cli {
                     out.println(" restart [agentservers]  Restart a set of agents in one command. The agents are splitted by \" \"");
                     out.println(" dumpcons <topic>/<consumerGroupId>         Display the consumer group information.");
                     out.println(" listcons              List all of consumer group, contains topic and group name");
+                    out.println(" rmgroup <topic> <groupId>         Retire the consumer group specified by topic and groupId");
                     out.println(" quit                  Quit the command line interface.");
                     out.println(" help                  Display help information.");
                 } else if (cmd.equals("quit")) {
@@ -224,6 +233,21 @@ public class Cli {
         @Override
         public void OnDisconnected(ByteBufferNonblockingConnection connection) {
             supervisor = null;
+        }
+
+        @Override
+        public void receiveTimout(ByteBuffer msg, ByteBufferNonblockingConnection conn) {
+
+        }
+
+        @Override
+        public void sendFailure(ByteBuffer msg, ByteBufferNonblockingConnection conn) {
+
+        }
+
+        @Override
+        public void setNioService(NioService<ByteBuffer, ByteBufferNonblockingConnection> service) {
+
         }
 
         @Override

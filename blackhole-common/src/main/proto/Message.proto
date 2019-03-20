@@ -36,6 +36,14 @@ import "PartitionRequireBroker.proto";
 import "ConsumerExit.proto";
 import "Heartbeat.proto";
 import "LogNotFound.proto";
+import "RetireConsumerGroup.proto";
+import "TransitionToLeader.proto";
+import "TransitionToFollower.proto";
+import "FollowerSyncStatus.proto";
+import "ReplicaException.proto";
+import "LeoReport.proto";
+import "LeoReply.proto";
+import "FollowerSyncStatusAck.proto";
 
 message Message {
     enum MessageType {
@@ -87,6 +95,14 @@ message Message {
         UNRESOLVED_CONNECTION = 46;
         CONSUMER_EXIT = 47;
         LOG_NOT_FOUND = 49;
+        RETIRE_CONSUMER_GROUP = 50;
+        TRANSITION_TO_LEADER = 51;
+        TRANSITION_TO_FOLLOWER = 52;
+        FOLLOWER_SYNC_STATUS = 53;
+        REPLICA_EXCEPTION = 54;
+        LEO_REPORT = 55;
+        LEO_REPLY = 56;
+        FOLLOWER_SYNC_STATUS_ACK = 57;
     }
 
     required MessageType type = 1;
@@ -124,4 +140,13 @@ message Message {
     optional ConsumerExit consumerExit = 33;
     optional Heartbeat heartbeat = 34;
     optional LogNotFound logNotFound = 35;
+    optional RetireConsumerGroup retireConsumerGroup = 36;
+    optional TransitionToLeader transitionToLeader = 37;
+    optional TransitionToFollower transitionToFollower = 38;
+    optional FollowerSyncStatus followerSyncStatus = 39;
+    optional ReplicaException replicaException = 40;
+    optional LeoReport leoReport = 41;
+    optional LeoReply leoReply = 42;
+    optional string callId = 43;
+    optional FollowerSyncStatusAck followerSyncStatusAck = 44;
 }
